@@ -39,7 +39,7 @@ import (
 )
 
 var (
-	ecsVersion                                                        = "v0.1.01"
+	ecsVersion                                                        = "v0.1.4"
 	menuMode                                                          bool
 	onlyChinaTest                                                     bool
 	input, choice                                                     string
@@ -308,29 +308,64 @@ func main() {
 		basicInfo, securityInfo, emailInfo, mediaInfo, ptInfo string
 		output, tempOutput                                    string
 	)
-	// 设置主程序的信号处理
+	// 信号处理部分
+	uploadDone := make(chan bool, 1)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	// 启动一个goroutine来等待信号，内置计时器
+	// 启动一个goroutine来等待信号
 	go func() {
 		startTime = time.Now()
-		// 等待信号
-		<-sig
-		if !finish {
-			endTime := time.Now()
-			duration := endTime.Sub(startTime)
-			minutes := int(duration.Minutes())
-			seconds := int(duration.Seconds()) % 60
-			currentTime := time.Now().Format("Mon Jan 2 15:04:05 MST 2006")
-			output = utils.PrintAndCapture(func() {
-				utils.PrintCenteredTitle("", width)
-				fmt.Printf("Cost    Time          : %d min %d sec\n", minutes, seconds)
-				fmt.Printf("Current Time          : %s\n", currentTime)
-				utils.PrintCenteredTitle("", width)
-			}, tempOutput, output)
-			utils.ProcessAndUpload(output, filePath, enabelUpload)
+		select {
+		case <-sig:
+			if !finish {
+				endTime := time.Now()
+				duration := endTime.Sub(startTime)
+				minutes := int(duration.Minutes())
+				seconds := int(duration.Seconds()) % 60
+				currentTime := time.Now().Format("Mon Jan 2 15:04:05 MST 2006")
+				var mu sync.Mutex
+				mu.Lock()
+				output = utils.PrintAndCapture(func() {
+					utils.PrintCenteredTitle("", width)
+					fmt.Printf("Cost    Time          : %d min %d sec\n", minutes, seconds)
+					fmt.Printf("Current Time          : %s\n", currentTime)
+					utils.PrintCenteredTitle("", width)
+				}, tempOutput, output)
+				mu.Unlock()
+				// 创建一个通道来传递上传结果
+				resultChan := make(chan struct {
+					httpURL  string
+					httpsURL string
+				}, 1) // 使用带缓冲的通道，避免可能的阻塞
+				// 启动上传
+				go func() {
+					httpURL, httpsURL := utils.ProcessAndUpload(output, filePath, enabelUpload)
+					resultChan <- struct {
+						httpURL  string
+						httpsURL string
+					}{httpURL, httpsURL}
+					uploadDone <- true
+				}()
+				// 等待上传完成或超时
+				select {
+				case result := <-resultChan:
+					if result.httpURL != "" || result.httpsURL != "" {
+						if language == "en" {
+							fmt.Printf("Upload successfully!\nHttp URL:  %s\nHttps URL: %s\n", result.httpURL, result.httpsURL)
+						} else {
+							fmt.Printf("上传成功!\nHttp URL:  %s\nHttps URL: %s\n", result.httpURL, result.httpsURL)
+						}
+					}
+					// 给打印操作一些时间完成
+					time.Sleep(100 * time.Millisecond)
+					os.Exit(0)
+				case <-time.After(30 * time.Second):
+					fmt.Println("上传超时，程序退出")
+					os.Exit(1)
+				}
+			}
+			os.Exit(0)
 		}
-		os.Exit(0)
 	}()
 	switch language {
 	case "zh":
@@ -574,7 +609,14 @@ func main() {
 	default:
 		fmt.Println("Unsupported language")
 	}
-	utils.ProcessAndUpload(output, filePath, enabelUpload)
+	httpURL, httpsURL := utils.ProcessAndUpload(output, filePath, enabelUpload)
+	if httpURL != "" || httpsURL != "" {
+		if language == "en" {
+			fmt.Printf("Upload successfully!\nHttp URL:  %s\nHttps URL: %s\n", httpURL, httpsURL)
+		} else {
+			fmt.Printf("上传成功!\nHttp URL:  %s\nHttps URL: %s\n", httpURL, httpsURL)
+		}
+	}
 	finish = true
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		fmt.Println("Press Enter to exit...")
